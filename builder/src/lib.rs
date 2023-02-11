@@ -123,7 +123,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
         }
         impl #builder_name {
             #builder_fns
-            pub fn build(&self) -> Result<#name, String> {
+            pub fn build(&self) -> std::result::Result<#name, String> {
                 return Ok(
                     #name {
                         #builder_main_struct
