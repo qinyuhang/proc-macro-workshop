@@ -1,72 +1,135 @@
 use proc_macro::TokenStream;
-use syn;
+use proc_macro2::{Ident, Span};
 use quote::quote;
+use syn;
 
 #[proc_macro_derive(Builder)]
 pub fn derive(input: TokenStream) -> TokenStream {
-    // let _ = input;
     let st = syn::parse_macro_input!(input as syn::DeriveInput);
     let name = &st.ident;
-    let data = match st.data {
-        syn::Data::Struct(d) => {
-            match &d.fields {
-                syn::Fields::Named(f_name) => {
-                    f_name.named.iter().for_each(|val| {
-                        println!("fileds: {:?}", val.ident.as_ref().unwrap().span());
-                    });
+    let builder_name = Ident::new(&format!("{name}Builder"), Span::call_site());
+
+    let ident_and_ty = if let syn::Data::Struct(syn::DataStruct {
+        fields: syn::Fields::Named(syn::FieldsNamed { ref named, .. }),
+        ..
+    }) = st.data
+    {
+        named
+            .iter()
+            .map(
+                |syn::Field {
+                     ref ident, ref ty, ..
+                 }| {
+                    // println!("{:?} {:?}", ident, ty);
+                    (ident, ty)
                 },
-                _ => {}
-            };
-            // println!("fields: {:?}", d.fields);
-            Some(d)
-        },
-        _ => None,
+            )
+            .collect::<Vec<_>>()
+    } else {
+        vec![]
     };
-    // let syn::Data::Struct(data) = &st.data;
-    // println!("name: {}, data: {:?}", &name, &data);
-    TokenStream::from( quote! {
+
+    let mut builder_fields_def = proc_macro2::TokenStream::new();
+    let mut builder_fns = proc_macro2::TokenStream::new();
+    let mut builder_default_fields = proc_macro2::TokenStream::new();
+    let mut builder_main_struct = proc_macro2::TokenStream::new();
+    
+
+    ident_and_ty.iter().for_each(|&(ident, ty)| {
+        if ident.is_none() {
+            return;
+        }
+        let ty_wrapped_with_option = if let syn::Type::Path(syn::TypePath {
+            path: syn::Path { segments, .. },
+            ..
+        }) = &ty
+        {
+            // println!("sg: {:?}", segments);
+            // println!("{:?}", segments.last().as_ref().unwrap().ident);
+            match segments.last().as_ref().unwrap().ident.to_string().as_str() {
+                // FIXME: 从 Option 中取出类型
+                "Option" => {
+                    if let syn::PathSegment {
+                        arguments:
+                            syn::PathArguments::AngleBracketed(syn::AngleBracketedGenericArguments {
+                                args: z,
+                                ..
+                            }),
+                        ..
+                    } = segments.last().as_ref().unwrap()
+                    {
+                        if let Some(syn::GenericArgument::Type(inner_type)) = z.last() {
+                            // println!("\n\nwtf inner_type: {:?}\n\n", inner_type);
+                            Some(inner_type)
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                }
+                _ => {
+                    // println!("find other type: {:?}", &ty);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        let ty_ = *ty_wrapped_with_option.as_ref().unwrap_or(&ty);
+        if ty_wrapped_with_option.as_ref().is_some() {
+            // struct 的字段是 Option 的
+            builder_main_struct.extend(
+                quote!(
+                    #ident: self.#ident.clone(),
+                )
+            );
+        } else {
+            builder_main_struct.extend(
+                quote!(
+                    #ident: self.#ident.as_ref().unwrap().clone(),
+                )
+            );
+        };
+        builder_fields_def.extend(quote! {
+            // FIXME: 如果 ty 就是 Option<T> 这里会出现 Option<Option<T>>
+            #ident: std::option::Option<#ty_>,
+        });
+        builder_default_fields.extend(quote! {
+            #ident: None,
+        });
+        builder_fns.extend(
+            // FIXME: 如果 ty 就是 Option<T> 这里会出现 Option<Option<T>>
+            quote! {
+                pub fn #ident(&mut self, #ident: #ty_) -> &mut Self {
+                    self.#ident = Some(#ident);
+                    self
+                }
+            },
+        );
+    });
+
+    TokenStream::from(quote! {
         impl #name {
-            pub fn builder() -> MyBuilder {
-                MyBuilder {
-                    executable: "".into(),
-                    args: vec![],
-                    env: vec![],
-                    current_dir: "".into(),
+            pub fn builder() -> #builder_name {
+                #builder_name {
+                    #builder_default_fields
                 }
             }
         }
-        pub struct MyBuilder {
-            executable: String,
-            args: Vec<String>,
-            env: Vec<String>,
-            current_dir: String,
-        }
-        impl MyBuilder {
-            pub fn executable(&mut self, exe: String) -> &mut Self {
-                self.executable = exe;
-                self
-            }
-            pub fn env(&mut self, env: Vec<String>) -> &mut Self {
-                self.env = env;
-                self
-            }
-            pub fn args(&mut self, args: Vec<String>) -> &mut Self {
-                self.args = args;
-                self
-            }
-            pub fn current_dir(&mut self, dir: String) -> &mut Self {
-                self.current_dir = dir;
-                self
-            }
-            pub fn build(&self) -> Result<#name, String> {
-                Ok(#name {
-                    executable: self.executable.clone(),
-                    args: self.args.clone(),
-                    env: self.env.clone(),
-                    current_dir: self.current_dir.clone(),
-                })
-            }
-        }
-    } )
 
+        pub struct #builder_name {
+            #builder_fields_def
+        }
+        impl #builder_name {
+            #builder_fns
+            pub fn build(&self) -> Result<#name, String> {
+                return Ok(
+                    #name {
+                        #builder_main_struct
+                    }
+                );
+            }
+        }
+    })
 }
